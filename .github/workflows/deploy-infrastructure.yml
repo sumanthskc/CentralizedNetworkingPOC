@@ -158,7 +158,6 @@ jobs:
       # WAIT FOR STACK INSTANCES
       #########################################################################
       - name: Wait for StackSet instances to complete
-        timeout-minutes: 45
         run: |
           aws cloudformation wait stack-set-operation-complete \
             --stack-set-name Spoke-Centralized \
