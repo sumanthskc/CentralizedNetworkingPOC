@@ -115,6 +115,12 @@ jobs:
               ParameterKey=TransitGatewayId,ParameterValue=${{ needs.deploy-hub.outputs.tgw_id }} \
             --operation-preferences \
               FailureToleranceCount=1,MaxConcurrentCount=2
+      - name: Wait for StackSet operation to complete
+        run: |
+          aws cloudformation wait stack-set-operation-complete \
+            --stack-set-name Spoke-Centralized \
+            --operation-id ${{ steps.create_spokes.outputs.operation_id }}
+
 
       - name: Deployment Complete
         run: |
