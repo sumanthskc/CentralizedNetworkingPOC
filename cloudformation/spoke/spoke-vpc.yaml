@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Spoke VPC with public and private subnets (StackSet, account-based CIDRs)
+
+############################################
+# PARAMETERS (ONLY GLOBAL PARAMETERS)
+############################################
+Parameters:
+  EnvironmentName:
+    Description: Environment name prefix (Spoke)
+    Type: String
+    Default: Spoke
+
+  TransitGatewayId:
+    Description: Transit Gateway ID from Hub Account
+    Type: String
+
+  HubVpcCIDR:
+    Description: Hub VPC CIDR
+    Type: String
+    Default: 10.0.0.0/16
+
+############################################
+# MAPPINGS (ACCOUNT-SPECIFIC CONFIG)
+############################################
+Mappings:
+  AccountConfig:
+    "414329322210":   # Spoke A
+      VpcCIDR: 10.1.0.0/16
+      PublicSubnetCIDR: 10.1.1.0/24
+      PrivateSubnetCIDR: 10.1.11.0/24
+      OtherSpokeCIDR: 10.2.0.0/16
+
+    "417371242369":   # Spoke B
+      VpcCIDR: 10.2.0.0/16
+      PublicSubnetCIDR: 10.2.1.0/24
+      PrivateSubnetCIDR: 10.2.11.0/24
+      OtherSpokeCIDR: 10.1.0.0/16
+
+############################################
+# RESOURCES
+############################################
+Resources:
+
+  ##########################################
+  # VPC
+  ##########################################
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [AccountConfig, !Ref AWS::AccountId, VpcCIDR]
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-${AWS::AccountId}-VPC
+
+  ##########################################
+  # INTERNET GATEWAY
+  ##########################################
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-IGW
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  ##########################################
+  # PUBLIC SUBNET
+  ##########################################
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [AccountConfig, !Ref AWS::AccountId, PublicSubnetCIDR]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Public-Subnet
+
+  ##########################################
+  # PRIVATE SUBNET
+  ##########################################
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !FindInMap [AccountConfig, !Ref AWS::AccountId, PrivateSubnetCIDR]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Private-Subnet
+
+  ##########################################
+  # ROUTE TABLES
+  ##########################################
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  ##########################################
+  # TRANSIT GATEWAY ATTACHMENT
+  ##########################################
+  TransitGatewayAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGatewayId
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-TGW-Attachment
+
+  ##########################################
+  # ROUTES TO HUB + OTHER SPOKE
+  ##########################################
+  RouteToHub:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: !Ref HubVpcCIDR
+      TransitGatewayId: !Ref TransitGatewayId
+
+  RouteToOtherSpoke:
+    Type: AWS::EC2::Route
+    DependsOn: TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: !FindInMap [AccountConfig, !Ref AWS::AccountId, OtherSpokeCIDR]
+      TransitGatewayId: !Ref TransitGatewayId
+
+############################################
+# OUTPUTS
+############################################
+Outputs:
+  VPCId:
+    Value: !Ref VPC
+
+  VpcCIDR:
+    Value: !FindInMap [AccountConfig, !Ref AWS::AccountId, VpcCIDR]
+
+  TGWAttachmentId:
+    Value: !Ref TransitGatewayAttachment

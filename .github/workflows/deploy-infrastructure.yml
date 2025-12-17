@@ -1,0 +1,121 @@
+name: Deploy Hub + Spokes Infrastructure
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'cloudformation/**/*.yaml'
+      - '.github/workflows/deploy-infrastructure.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-west-1
+  HUB_ACCOUNT_ID: "881490088884"
+  SPOKE_A_ACCOUNT_ID: "414329322210"
+  SPOKE_B_ACCOUNT_ID: "417371242369"
+
+jobs:
+###############################################################################
+# HUB DEPLOYMENT
+###############################################################################
+  deploy-hub:
+    name: Deploy Hub VPC + TGW
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy Hub Stack
+        run: |
+          aws cloudformation deploy \
+            --stack-name hub-networking \
+            --template-file cloudformation/hub/centralized-vpc.yaml \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              EnvironmentName=Hub \
+              VpcCIDR=10.0.0.0/16 \
+              PublicSubnet1CIDR=10.0.1.0/24 \
+              PublicSubnet2CIDR=10.0.2.0/24 \
+              PrivateSubnet1CIDR=10.0.11.0/24 \
+              PrivateSubnet2CIDR=10.0.12.0/24 \
+            --no-fail-on-empty-changeset
+
+      - name: Extract Transit Gateway ID
+        id: tgw
+        run: |
+          TGW_ID=$(aws cloudformation describe-stacks \
+            --stack-name hub-networking \
+            --query "Stacks[0].Outputs[?OutputKey=='TransitGatewayId'].OutputValue" \
+            --output text)
+          echo "tgw_id=$TGW_ID" >> $GITHUB_OUTPUT
+
+    outputs:
+      tgw_id: ${{ steps.tgw.outputs.tgw_id }}
+
+###############################################################################
+# SPOKE STACKSET DEPLOYMENT
+###############################################################################
+  deploy-spokes:
+    name: Deploy Spoke StackSet (A + B)
+    runs-on: ubuntu-latest
+    needs: deploy-hub
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      #########################################################################
+      # CREATE OR UPDATE STACKSET
+      #########################################################################
+      - name: Create or Update StackSet
+        run: |
+          STACKSET="Spoke-Centralized"
+
+          if aws cloudformation describe-stack-set --stack-set-name "$STACKSET" >/dev/null 2>&1; then
+            echo "Updating StackSet..."
+            aws cloudformation update-stack-set \
+              --stack-set-name "$STACKSET" \
+              --template-body file://cloudformation/spoke/spoke-vpc.yaml \
+              --capabilities CAPABILITY_NAMED_IAM
+          else
+            echo "Creating StackSet..."
+            aws cloudformation create-stack-set \
+              --stack-set-name "$STACKSET" \
+              --template-body file://cloudformation/spoke/spoke-vpc.yaml \
+              --administration-role-arn arn:aws:iam::${{ env.HUB_ACCOUNT_ID }}:role/AWSCloudFormationStackSetAdministrationRole \
+              --execution-role-name AWSCloudFormationStackSetExecutionRoleSumanth \
+              --capabilities CAPABILITY_NAMED_IAM
+          fi
+
+      #########################################################################
+      # CREATE STACK INSTANCES (SPOKE A + SPOKE B TOGETHER)
+      #########################################################################
+      - name: Deploy Spoke A & B (Parallel)
+        run: |
+          aws cloudformation create-stack-instances \
+            --stack-set-name Spoke-Centralized \
+            --accounts \
+              ${{ env.SPOKE_A_ACCOUNT_ID }} \
+              ${{ env.SPOKE_B_ACCOUNT_ID }} \
+            --regions ${{ env.AWS_REGION }} \
+            --parameter-overrides \
+              ParameterKey=TransitGatewayId,ParameterValue=${{ needs.deploy-hub.outputs.tgw_id }} \
+            --operation-preferences \
+              FailureToleranceCount=1,MaxConcurrentCount=2
+
+      - name: Deployment Complete
+        run: |
+          echo "Hub + Spoke A + Spoke B deployed successfully"

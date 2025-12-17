@@ -1,0 +1,406 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Central Hub VPC with public/private subnets (2 AZs), NAT gateways, route tables,
+  Transit Gateway and Hub attachment. Parameterized for reuse and StackSet exports.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name prefix for resources (used in tags & exports)
+    Default: Hub
+
+  VpcCIDR:
+    Type: String
+    Description: CIDR block for Hub VPC
+    Default: 10.0.0.0/16
+
+  PublicSubnet1CIDR:
+    Type: String
+    Description: CIDR block for public subnet in AZ1
+    Default: 10.0.1.0/24
+
+  PublicSubnet2CIDR:
+    Type: String
+    Description: CIDR block for public subnet in AZ2
+    Default: 10.0.2.0/24
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Description: CIDR block for private subnet in AZ1
+    Default: 10.0.11.0/24
+
+  PrivateSubnet2CIDR:
+    Type: String
+    Description: CIDR block for private subnet in AZ2
+    Default: 10.0.12.0/24
+
+  SpokeACIDR:
+    Type: String
+    Description: Spoke A VPC CIDR (used to create hub routes to spoke A)
+    Default: 10.1.0.0/16
+
+  SpokeBCIDR:
+    Type: String
+    Description: Spoke B VPC CIDR (used to create hub routes to spoke B)
+    Default: 10.2.0.0/16
+
+  TransitGatewayDescription:
+    Type: String
+    Description: Transit Gateway description
+    Default: Central Transit Gateway for multi-account networking
+
+Mappings:
+  # Optional mapping to support AZ indexing; kept minimal here
+  AZIndex:
+    us-east-1:
+      AZ1: 0
+      AZ2: 1
+
+Resources:
+
+  ###################################################################
+  # VPC & Subnets (Hub)
+  ###################################################################
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-VPC
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-IGW
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Public-Subnet-AZ1
+        - Key: Type
+          Value: Public
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Public-Subnet-AZ2
+        - Key: Type
+          Value: Public
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Private-Subnet-AZ1
+        - Key: Type
+          Value: Private
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Private-Subnet-AZ2
+        - Key: Type
+          Value: Private
+
+  ###################################################################
+  # NAT Gateways (one per AZ) and EIPs
+  ###################################################################
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NAT-Gateway-AZ1-EIP
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NAT-Gateway-AZ2-EIP
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NAT-Gateway-AZ1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NAT-Gateway-AZ2
+
+  ###################################################################
+  # Route Tables: Public and Private
+  ###################################################################
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Public-Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Private-Routes-AZ1
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Private-Routes-AZ2
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  ###################################################################
+  # Transit Gateway and Attachment
+  ###################################################################
+  TransitGateway:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      AmazonSideAsn: 64512
+      Description: !Ref TransitGatewayDescription
+      AutoAcceptSharedAttachments: enable
+      DefaultRouteTableAssociation: enable
+      DefaultRouteTablePropagation: enable
+      DnsSupport: enable
+      VpnEcmpSupport: enable
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-TGW
+
+  HubVPCAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    DependsOn:
+      - TransitGateway
+      - PrivateSubnet1
+      - PrivateSubnet2
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-VPC-TGW-Attachment
+
+  ###################################################################
+  # Hub Private Route Table -> TGW: Routes to Spoke CIDRs
+  ###################################################################
+  HubPrivateRoute1ToSpokeA:
+    Type: AWS::EC2::Route
+    DependsOn: HubVPCAttachment
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: !Ref SpokeACIDR
+      TransitGatewayId: !Ref TransitGateway
+
+  HubPrivateRoute2ToSpokeA:
+    Type: AWS::EC2::Route
+    DependsOn: HubVPCAttachment
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: !Ref SpokeACIDR
+      TransitGatewayId: !Ref TransitGateway
+
+  HubPrivateRoute1ToSpokeB:
+    Type: AWS::EC2::Route
+    DependsOn: HubVPCAttachment
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: !Ref SpokeBCIDR
+      TransitGatewayId: !Ref TransitGateway
+
+  HubPrivateRoute2ToSpokeB:
+    Type: AWS::EC2::Route
+    DependsOn: HubVPCAttachment
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: !Ref SpokeBCIDR
+      TransitGatewayId: !Ref TransitGateway
+
+  ###################################################################
+  # Optional: Tags & Metadata helpers (example IAM role for cross-account deployments)
+  # Note: You can add the IAM roles for StackSet/AssumeRole here per POC, if required.
+  ###################################################################
+  # Example cross-account role to be used by GitHub Actions (commented - uncomment & customize)
+  #
+  # StackSetExecutionRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     RoleName: !Sub ${EnvironmentName}-StackSet-ExecutionRole
+  #     AssumeRolePolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             AWS: !Sub arn:aws:iam::123456789012:role/YourDeploymentRole
+  #           Action: sts:AssumeRole
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/AdministratorAccess
+
+Outputs:
+  VPC:
+    Description: Hub VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${EnvironmentName}-VPC-ID
+
+  VpcCIDR:
+    Description: Hub VPC CIDR
+    Value: !Ref VpcCIDR
+    Export:
+      Name: !Sub ${EnvironmentName}-VPC-CIDR
+
+  PublicSubnet1:
+    Description: Public Subnet AZ1 ID
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: !Sub ${EnvironmentName}-PublicSubnet1-ID
+
+  PublicSubnet2:
+    Description: Public Subnet AZ2 ID
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: !Sub ${EnvironmentName}-PublicSubnet2-ID
+
+  PrivateSubnet1:
+    Description: Private Subnet AZ1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateSubnet1-ID
+
+  PrivateSubnet2:
+    Description: Private Subnet AZ2 ID
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateSubnet2-ID
+
+  PublicRouteTableId:
+    Description: Public route table ID
+    Value: !Ref PublicRouteTable
+    Export:
+      Name: !Sub ${EnvironmentName}-PublicRouteTable-ID
+
+  PrivateRouteTable1:
+    Description: Private Route Table AZ1
+    Value: !Ref PrivateRouteTable1
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateRouteTable1-ID
+
+  PrivateRouteTable2:
+    Description: Private Route Table AZ2
+    Value: !Ref PrivateRouteTable2
+    Export:
+      Name: !Sub ${EnvironmentName}-PrivateRouteTable2-ID
+
+  TransitGatewayId:
+    Description: Transit Gateway ID
+    Value: !Ref TransitGateway
+    Export:
+      Name: !Sub ${EnvironmentName}-TGW-ID
+
+  HubVPCAttachmentId:
+    Description: Hub VPC Transit Gateway Attachment ID
+    Value: !Ref HubVPCAttachment
+    Export:
+      Name: !Sub ${EnvironmentName}-VPC-TGW-Attachment-ID
