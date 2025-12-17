@@ -14,12 +14,12 @@ env:
   SPOKE_A_ACCOUNT_ID: "414329322210"
   SPOKE_B_ACCOUNT_ID: "417371242369"
 
-jobs:
 ###############################################################################
 # HUB DEPLOYMENT
 ###############################################################################
+jobs:
   deploy-hub:
-    name: Deploy Hub VPC + TGW
+    name: Deploy Hub VPC + Transit Gateway
     runs-on: ubuntu-latest
 
     steps:
@@ -63,7 +63,7 @@ jobs:
 # SPOKE STACKSET DEPLOYMENT
 ###############################################################################
   deploy-spokes:
-    name: Deploy Spoke StackSet (A + B)
+    name: Deploy Spoke StackSet (Idempotent + Wait)
     runs-on: ubuntu-latest
     needs: deploy-hub
 
@@ -84,7 +84,8 @@ jobs:
         run: |
           STACKSET="Spoke-Centralized"
 
-          if aws cloudformation describe-stack-set --stack-set-name "$STACKSET" >/dev/null 2>&1; then
+          if aws cloudformation describe-stack-set \
+            --stack-set-name "$STACKSET" >/dev/null 2>&1; then
             echo "Updating StackSet..."
             aws cloudformation update-stack-set \
               --stack-set-name "$STACKSET" \
@@ -101,27 +102,57 @@ jobs:
           fi
 
       #########################################################################
-      # CREATE STACK INSTANCES (SPOKE A + SPOKE B TOGETHER)
+      # CREATE OR UPDATE STACK INSTANCES (IDEMPOTENT)
       #########################################################################
-      - name: Deploy Spoke A & B (Parallel)
+      - name: Deploy or Update Spoke A & B
+        id: spokes
         run: |
-          aws cloudformation create-stack-instances \
-            --stack-set-name Spoke-Centralized \
-            --accounts \
-              ${{ env.SPOKE_A_ACCOUNT_ID }} \
-              ${{ env.SPOKE_B_ACCOUNT_ID }} \
-            --regions ${{ env.AWS_REGION }} \
+          STACKSET="Spoke-Centralized"
+          REGION="${{ env.AWS_REGION }}"
+          TGW_ID="${{ needs.deploy-hub.outputs.tgw_id }}"
+          ACCOUNTS="${{ env.SPOKE_A_ACCOUNT_ID }} ${{ env.SPOKE_B_ACCOUNT_ID }}"
+
+          EXISTING=$(aws cloudformation list-stack-instances \
+            --stack-set-name $STACKSET \
+            --region $REGION \
+            --query "Summaries[].Account" \
+            --output text)
+
+          OPERATION="create-stack-instances"
+
+          for ACCOUNT in $ACCOUNTS; do
+            if echo "$EXISTING" | grep -q "$ACCOUNT"; then
+              OPERATION="update-stack-instances"
+              break
+            fi
+          done
+
+          echo "Using operation: $OPERATION"
+
+          OPERATION_ID=$(aws cloudformation $OPERATION \
+            --stack-set-name $STACKSET \
+            --accounts $ACCOUNTS \
+            --regions $REGION \
             --parameter-overrides \
-              ParameterKey=TransitGatewayId,ParameterValue=${{ needs.deploy-hub.outputs.tgw_id }} \
+              ParameterKey=TransitGatewayId,ParameterValue=$TGW_ID \
             --operation-preferences \
-              FailureToleranceCount=1,MaxConcurrentCount=2
+              FailureToleranceCount=1,MaxConcurrentCount=2 \
+            --query OperationId \
+            --output text)
+
+          echo "operation_id=$OPERATION_ID" >> $GITHUB_OUTPUT
+          echo "Started StackSet operation: $OPERATION_ID"
+
+      #########################################################################
+      # WAIT FOR COMPLETION
+      #########################################################################
       - name: Wait for StackSet operation to complete
+        timeout-minutes: 45
         run: |
           aws cloudformation wait stack-set-operation-complete \
             --stack-set-name Spoke-Centralized \
-            --operation-id ${{ steps.create_spokes.outputs.operation_id }}
-
+            --operation-id ${{ steps.spokes.outputs.operation_id }}
 
       - name: Deployment Complete
         run: |
-          echo "Hub + Spoke A + Spoke B deployed successfully"
+          echo "Hub + Spoke A + Spoke B deployment completed successfully"
