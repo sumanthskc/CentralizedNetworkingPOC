@@ -154,14 +154,6 @@ jobs:
           echo "operation_id=$OPERATION_ID" >> $GITHUB_OUTPUT
           echo "StackSet instance operation started: $OPERATION_ID"
 
-      #########################################################################
-      # WAIT FOR STACK INSTANCES
-      #########################################################################
-      - name: Wait for StackSet instances to complete
-        run: |
-          aws cloudformation wait stack-set-operation-complete \
-            --stack-set-name Spoke-Centralized \
-            --operation-id ${{ steps.instances.outputs.operation_id }}
 
       - name: Deployment Complete
         run: |
