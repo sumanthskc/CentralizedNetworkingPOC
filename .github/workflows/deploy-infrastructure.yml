@@ -63,7 +63,7 @@ jobs:
 # SPOKE STACKSET DEPLOYMENT
 ###############################################################################
   deploy-spokes:
-    name: Deploy Spoke StackSet (Idempotent + Wait)
+    name: Deploy Spoke StackSet (Fully Synchronized)
     runs-on: ubuntu-latest
     needs: deploy-hub
 
@@ -78,34 +78,54 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       #########################################################################
-      # CREATE OR UPDATE STACKSET
+      # CREATE OR UPDATE STACKSET (DEFINITION)
       #########################################################################
       - name: Create or Update StackSet
+        id: stackset
         run: |
           STACKSET="Spoke-Centralized"
 
           if aws cloudformation describe-stack-set \
             --stack-set-name "$STACKSET" >/dev/null 2>&1; then
-            echo "Updating StackSet..."
-            aws cloudformation update-stack-set \
+            echo "Updating StackSet definition..."
+
+            OPERATION_ID=$(aws cloudformation update-stack-set \
               --stack-set-name "$STACKSET" \
               --template-body file://cloudformation/spoke/spoke-vpc.yaml \
-              --capabilities CAPABILITY_NAMED_IAM
+              --capabilities CAPABILITY_NAMED_IAM \
+              --query OperationId \
+              --output text)
           else
             echo "Creating StackSet..."
-            aws cloudformation create-stack-set \
+
+            OPERATION_ID=$(aws cloudformation create-stack-set \
               --stack-set-name "$STACKSET" \
               --template-body file://cloudformation/spoke/spoke-vpc.yaml \
               --administration-role-arn arn:aws:iam::${{ env.HUB_ACCOUNT_ID }}:role/AWSCloudFormationStackSetAdministrationRole \
               --execution-role-name AWSCloudFormationStackSetExecutionRoleSumanth \
-              --capabilities CAPABILITY_NAMED_IAM
+              --capabilities CAPABILITY_NAMED_IAM \
+              --query OperationId \
+              --output text)
           fi
+
+          echo "operation_id=$OPERATION_ID" >> $GITHUB_OUTPUT
+          echo "StackSet definition operation started: $OPERATION_ID"
+
+      #########################################################################
+      # WAIT FOR STACKSET DEFINITION
+      #########################################################################
+      - name: Wait for StackSet definition to complete
+        timeout-minutes: 30
+        run: |
+          aws cloudformation wait stack-set-operation-complete \
+            --stack-set-name Spoke-Centralized \
+            --operation-id ${{ steps.stackset.outputs.operation_id }}
 
       #########################################################################
       # CREATE OR UPDATE STACK INSTANCES (IDEMPOTENT)
       #########################################################################
       - name: Deploy or Update Spoke A & B
-        id: spokes
+        id: instances
         run: |
           STACKSET="Spoke-Centralized"
           REGION="${{ env.AWS_REGION }}"
@@ -127,7 +147,7 @@ jobs:
             fi
           done
 
-          echo "Using operation: $OPERATION"
+          echo "Using instance operation: $OPERATION"
 
           OPERATION_ID=$(aws cloudformation $OPERATION \
             --stack-set-name $STACKSET \
@@ -141,17 +161,17 @@ jobs:
             --output text)
 
           echo "operation_id=$OPERATION_ID" >> $GITHUB_OUTPUT
-          echo "Started StackSet operation: $OPERATION_ID"
+          echo "StackSet instance operation started: $OPERATION_ID"
 
       #########################################################################
-      # WAIT FOR COMPLETION
+      # WAIT FOR STACK INSTANCES
       #########################################################################
-      - name: Wait for StackSet operation to complete
+      - name: Wait for StackSet instances to complete
         timeout-minutes: 45
         run: |
           aws cloudformation wait stack-set-operation-complete \
             --stack-set-name Spoke-Centralized \
-            --operation-id ${{ steps.spokes.outputs.operation_id }}
+            --operation-id ${{ steps.instances.outputs.operation_id }}
 
       - name: Deployment Complete
         run: |
