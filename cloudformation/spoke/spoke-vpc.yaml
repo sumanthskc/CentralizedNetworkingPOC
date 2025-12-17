@@ -13,6 +13,7 @@ Parameters:
   TransitGatewayId:
     Description: Transit Gateway ID from Hub Account
     Type: String
+    Default: dummy
 
   HubVpcCIDR:
     Description: Hub VPC CIDR
