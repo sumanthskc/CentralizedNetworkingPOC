@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  Central Hub VPC with public/private subnets (2 AZs), NAT gateways,
+  Central Hub VPC with public/private subnets (2 AZs),
   Transit Gateway, TGW VPC attachment, and RAM sharing to Spoke accounts.
-  Designed for Stack + StackSet based multi-account networking.
+  NAT Gateways intentionally removed.
 
 ############################################################
 # PARAMETERS
@@ -11,12 +11,10 @@ Parameters:
   EnvironmentName:
     Type: String
     Default: Hub
-    Description: Environment name prefix
 
   VpcCIDR:
     Type: String
     Default: 10.0.0.0/16
-    Description: CIDR block for Hub VPC
 
   PublicSubnet1CIDR:
     Type: String
@@ -37,33 +35,29 @@ Parameters:
   SpokeACIDR:
     Type: String
     Default: 10.1.0.0/16
-    Description: Spoke A VPC CIDR
 
   SpokeBCIDR:
     Type: String
     Default: 10.2.0.0/16
-    Description: Spoke B VPC CIDR
 
   SpokeAAccountId:
     Type: String
-    Description: AWS Account ID for Spoke A
 
   SpokeBAccountId:
     Type: String
-    Description: AWS Account ID for Spoke B
 
   TransitGatewayDescription:
     Type: String
-    Default: Central Transit Gateway for Hub-Spoke Architecture
+    Default: Central TGW for Hub-Spoke Architecture
 
 ############################################################
 # RESOURCES
 ############################################################
 Resources:
 
-  ##########################################################
+  ############################
   # VPC
-  ##########################################################
+  ############################
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -74,15 +68,11 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-VPC
 
-  ##########################################################
+  ############################
   # INTERNET GATEWAY
-  ##########################################################
+  ############################
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-IGW
 
   InternetGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -90,9 +80,9 @@ Resources:
       InternetGatewayId: !Ref InternetGateway
       VpcId: !Ref VPC
 
-  ##########################################################
+  ############################
   # SUBNETS
-  ##########################################################
+  ############################
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -100,9 +90,6 @@ Resources:
       AvailabilityZone: !Select [0, !GetAZs '']
       CidrBlock: !Ref PublicSubnet1CIDR
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-Public-AZ1
 
   PublicSubnet2:
     Type: AWS::EC2::Subnet
@@ -111,9 +98,6 @@ Resources:
       AvailabilityZone: !Select [1, !GetAZs '']
       CidrBlock: !Ref PublicSubnet2CIDR
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-Public-AZ2
 
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
@@ -122,9 +106,6 @@ Resources:
       AvailabilityZone: !Select [0, !GetAZs '']
       CidrBlock: !Ref PrivateSubnet1CIDR
       MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-Private-AZ1
 
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
@@ -133,40 +114,10 @@ Resources:
       AvailabilityZone: !Select [1, !GetAZs '']
       CidrBlock: !Ref PrivateSubnet2CIDR
       MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-Private-AZ2
 
-  ##########################################################
-  # NAT GATEWAYS
-  ##########################################################
-  NatEip1:
-    Type: AWS::EC2::EIP
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      Domain: vpc
-
-  NatEip2:
-    Type: AWS::EC2::EIP
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      Domain: vpc
-
-  NatGateway1:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt NatEip1.AllocationId
-      SubnetId: !Ref PublicSubnet1
-
-  NatGateway2:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt NatEip2.AllocationId
-      SubnetId: !Ref PublicSubnet2
-
-  ##########################################################
+  ############################
   # ROUTE TABLES
-  ##########################################################
+  ############################
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -197,13 +148,6 @@ Resources:
     Properties:
       VpcId: !Ref VPC
 
-  PrivateRoute1:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable1
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway1
-
   PrivateSubnet1Assoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -215,22 +159,15 @@ Resources:
     Properties:
       VpcId: !Ref VPC
 
-  PrivateRoute2:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable2
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway2
-
   PrivateSubnet2Assoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet2
       RouteTableId: !Ref PrivateRouteTable2
 
-  ##########################################################
+  ############################
   # TRANSIT GATEWAY
-  ##########################################################
+  ############################
   TransitGateway:
     Type: AWS::EC2::TransitGateway
     Properties:
@@ -240,10 +177,6 @@ Resources:
       DefaultRouteTableAssociation: enable
       DefaultRouteTablePropagation: enable
       DnsSupport: enable
-      VpnEcmpSupport: enable
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-TGW
 
   HubVPCAttachment:
     Type: AWS::EC2::TransitGatewayAttachment
@@ -254,9 +187,9 @@ Resources:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
 
-  ##########################################################
+  ############################
   # HUB → SPOKE ROUTES
-  ##########################################################
+  ############################
   RouteToSpokeA1:
     Type: AWS::EC2::Route
     Properties:
@@ -285,9 +218,9 @@ Resources:
       DestinationCidrBlock: !Ref SpokeBCIDR
       TransitGatewayId: !Ref TransitGateway
 
-  ##########################################################
-  # RAM SHARE – SHARE TGW TO SPOKES
-  ##########################################################
+  ############################
+  # RAM SHARE
+  ############################
   TransitGatewayRAMShare:
     Type: AWS::RAM::ResourceShare
     Properties:
@@ -305,13 +238,9 @@ Resources:
 Outputs:
   VPCId:
     Value: !Ref VPC
-    Export:
-      Name: !Sub ${EnvironmentName}-VPC-ID
 
   TransitGatewayId:
     Value: !Ref TransitGateway
-    Export:
-      Name: !Sub ${EnvironmentName}-TGW-ID
 
   HubVPCAttachmentId:
     Value: !Ref HubVPCAttachment
