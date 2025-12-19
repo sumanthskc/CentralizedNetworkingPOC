@@ -192,6 +192,7 @@ Resources:
   ############################
   RouteToSpokeA1:
     Type: AWS::EC2::Route
+    DependsOn: HubVPCAttachment
     Properties:
       RouteTableId: !Ref PrivateRouteTable1
       DestinationCidrBlock: !Ref SpokeACIDR
@@ -199,6 +200,7 @@ Resources:
 
   RouteToSpokeB1:
     Type: AWS::EC2::Route
+    DependsOn: HubVPCAttachment
     Properties:
       RouteTableId: !Ref PrivateRouteTable1
       DestinationCidrBlock: !Ref SpokeBCIDR
@@ -206,6 +208,7 @@ Resources:
 
   RouteToSpokeA2:
     Type: AWS::EC2::Route
+    DependsOn: HubVPCAttachment
     Properties:
       RouteTableId: !Ref PrivateRouteTable2
       DestinationCidrBlock: !Ref SpokeACIDR
@@ -213,6 +216,7 @@ Resources:
 
   RouteToSpokeB2:
     Type: AWS::EC2::Route
+    DependsOn: HubVPCAttachment
     Properties:
       RouteTableId: !Ref PrivateRouteTable2
       DestinationCidrBlock: !Ref SpokeBCIDR
@@ -230,7 +234,7 @@ Resources:
         - !Ref SpokeAAccountId
         - !Ref SpokeBAccountId
       ResourceArns:
-        - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:transit-gateway/${TransitGateway}
+        - !GetAtt TransitGateway.Arn
 
 ############################################################
 # OUTPUTS
