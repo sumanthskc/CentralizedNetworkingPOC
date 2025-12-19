@@ -1,9 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Spoke VPC with public and private subnets (StackSet, account-based CIDRs)
 
-############################################
-# PARAMETERS (ONLY GLOBAL PARAMETERS)
-############################################
 Parameters:
   EnvironmentName:
     Description: Environment name prefix (Spoke)

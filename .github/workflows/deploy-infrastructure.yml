@@ -14,25 +14,29 @@ env:
   SPOKE_A_ACCOUNT_ID: "414329322210"
   SPOKE_B_ACCOUNT_ID: "417371242369"
 
-###############################################################################
-# HUB DEPLOYMENT
-###############################################################################
+############################################################
+# JOB 1 — DEPLOY HUB (VPC + TGW + RAM SHARE)
+############################################################
 jobs:
   deploy-hub:
-    name: Deploy Hub VPC + Transit Gateway
+    name: Deploy Hub Networking
     runs-on: ubuntu-latest
 
-    steps:
-      - uses: actions/checkout@v4
+    outputs:
+      tgw_id: ${{ steps.get-tgw.outputs.tgw_id }}
 
-      - name: Configure AWS Credentials
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (Hub)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Deploy Hub Stack
+      - name: Deploy Hub CloudFormation Stack
         run: |
           aws cloudformation deploy \
             --stack-name hub-networking \
@@ -45,115 +49,107 @@ jobs:
               PublicSubnet2CIDR=10.0.2.0/24 \
               PrivateSubnet1CIDR=10.0.11.0/24 \
               PrivateSubnet2CIDR=10.0.12.0/24 \
+              SpokeAAccountId=${{ env.SPOKE_A_ACCOUNT_ID }} \
+              SpokeBAccountId=${{ env.SPOKE_B_ACCOUNT_ID }} \
             --no-fail-on-empty-changeset
 
       - name: Extract Transit Gateway ID
-        id: tgw
+        id: get-tgw
         run: |
           TGW_ID=$(aws cloudformation describe-stacks \
             --stack-name hub-networking \
             --query "Stacks[0].Outputs[?OutputKey=='TransitGatewayId'].OutputValue" \
             --output text)
+
           echo "tgw_id=$TGW_ID" >> $GITHUB_OUTPUT
+          echo "Transit Gateway ID: $TGW_ID"
 
-    outputs:
-      tgw_id: ${{ steps.tgw.outputs.tgw_id }}
+      - name: Wait for RAM share propagation
+        run: |
+          echo "Waiting for TGW RAM share propagation..."
+          sleep 60
 
-###############################################################################
-# SPOKE STACKSET DEPLOYMENT
-###############################################################################
+############################################################
+# JOB 2 — DEPLOY SPOKES USING STACKSET
+############################################################
   deploy-spokes:
-    name: Deploy Spoke StackSet (Fully Synchronized)
+    name: Deploy Spoke StackSet
     runs-on: ubuntu-latest
     needs: deploy-hub
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS Credentials (Hub – StackSet Admin)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      #########################################################################
-      # CREATE OR UPDATE STACKSET (DEFINITION)
-      #########################################################################
-      - name: Create or Update StackSet
+      ########################################################
+      # CREATE OR UPDATE STACKSET DEFINITION
+      ########################################################
+      - name: Create or Update Spoke StackSet
         id: stackset
         run: |
-          STACKSET="Spoke-Centralized"
+          STACKSET_NAME="Spoke-Centralized"
 
           if aws cloudformation describe-stack-set \
-            --stack-set-name "$STACKSET" >/dev/null 2>&1; then
-            echo "Updating StackSet definition..."
+            --stack-set-name "$STACKSET_NAME" >/dev/null 2>&1; then
 
-            OPERATION_ID=$(aws cloudformation update-stack-set \
-              --stack-set-name "$STACKSET" \
+            echo "Updating existing StackSet..."
+            aws cloudformation update-stack-set \
+              --stack-set-name "$STACKSET_NAME" \
               --template-body file://cloudformation/spoke/spoke-vpc.yaml \
-              --capabilities CAPABILITY_NAMED_IAM \
-              --query OperationId \
-              --output text)
-          else
-            echo "Creating StackSet..."
+              --capabilities CAPABILITY_NAMED_IAM
 
-            OPERATION_ID=$(aws cloudformation create-stack-set \
-              --stack-set-name "$STACKSET" \
+          else
+            echo "Creating new StackSet..."
+            aws cloudformation create-stack-set \
+              --stack-set-name "$STACKSET_NAME" \
               --template-body file://cloudformation/spoke/spoke-vpc.yaml \
               --administration-role-arn arn:aws:iam::${{ env.HUB_ACCOUNT_ID }}:role/AWSCloudFormationStackSetAdministrationRole \
               --execution-role-name AWSCloudFormationStackSetExecutionRoleSumanth \
-              --capabilities CAPABILITY_NAMED_IAM \
-              --query OperationId \
-              --output text)
+              --capabilities CAPABILITY_NAMED_IAM
           fi
 
-          echo "operation_id=$OPERATION_ID" >> $GITHUB_OUTPUT
-          echo "StackSet definition operation started: $OPERATION_ID"
-
-
-      #########################################################################
+      ########################################################
       # CREATE OR UPDATE STACK INSTANCES (IDEMPOTENT)
-      #########################################################################
-      - name: Deploy or Update Spoke A & B
-        id: instances
+      ########################################################
+      - name: Deploy Spoke A & Spoke B Stack Instances
         run: |
-          STACKSET="Spoke-Centralized"
+          STACKSET_NAME="Spoke-Centralized"
           REGION="${{ env.AWS_REGION }}"
           TGW_ID="${{ needs.deploy-hub.outputs.tgw_id }}"
           ACCOUNTS="${{ env.SPOKE_A_ACCOUNT_ID }} ${{ env.SPOKE_B_ACCOUNT_ID }}"
 
-          EXISTING=$(aws cloudformation list-stack-instances \
-            --stack-set-name $STACKSET \
-            --region $REGION \
+          EXISTING_ACCOUNTS=$(aws cloudformation list-stack-instances \
+            --stack-set-name "$STACKSET_NAME" \
+            --region "$REGION" \
             --query "Summaries[].Account" \
             --output text)
 
           OPERATION="create-stack-instances"
 
           for ACCOUNT in $ACCOUNTS; do
-            if echo "$EXISTING" | grep -q "$ACCOUNT"; then
+            if echo "$EXISTING_ACCOUNTS" | grep -q "$ACCOUNT"; then
               OPERATION="update-stack-instances"
               break
             fi
           done
 
-          echo "Using instance operation: $OPERATION"
+          echo "Using operation: $OPERATION"
 
-          OPERATION_ID=$(aws cloudformation $OPERATION \
-            --stack-set-name $STACKSET \
+          aws cloudformation $OPERATION \
+            --stack-set-name "$STACKSET_NAME" \
             --accounts $ACCOUNTS \
-            --regions $REGION \
+            --regions "$REGION" \
             --parameter-overrides \
               ParameterKey=TransitGatewayId,ParameterValue=$TGW_ID \
             --operation-preferences \
-              FailureToleranceCount=1,MaxConcurrentCount=2 \
-            --query OperationId \
-            --output text)
-
-          echo "operation_id=$OPERATION_ID" >> $GITHUB_OUTPUT
-          echo "StackSet instance operation started: $OPERATION_ID"
-
+              FailureToleranceCount=1,MaxConcurrentCount=2
 
       - name: Deployment Complete
         run: |
