@@ -234,7 +234,7 @@ Resources:
         - !Ref SpokeAAccountId
         - !Ref SpokeBAccountId
       ResourceArns:
-        - !GetAtt TransitGateway.Arn
+        - !Sub arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:transit-gateway/${TransitGateway}
 
 ############################################################
 # OUTPUTS
