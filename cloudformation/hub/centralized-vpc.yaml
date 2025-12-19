@@ -225,7 +225,7 @@ Resources:
     Type: AWS::RAM::ResourceShare
     Properties:
       Name: !Sub ${EnvironmentName}-TGW-Share
-      AllowExternalPrincipals: false
+      AllowExternalPrincipals: true
       Principals:
         - !Ref SpokeAAccountId
         - !Ref SpokeBAccountId
